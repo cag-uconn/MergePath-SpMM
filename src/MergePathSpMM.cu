@@ -1,5 +1,3 @@
-
-
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <stdio.h>
@@ -19,7 +17,7 @@
 #include <string>
 #include <vector>
 
-#include "inputs/cora.h"
+#include "../../osdi-ae-graphs/cora.h"
 using namespace std;
 
 #define ROW_PTR 0
@@ -139,6 +137,8 @@ std::vector<int *> generate_mp_sched(int num_threads) {
         end_row_all[core_id]       = end;       
 
     }
+    cout << feature_start_all[0] << " " << feature_end_all[0] << " " << start_row_all[0]
+    << " " << end_row_all[0]  << endl;
     return {feature_start_all, feature_end_all, 
             feature_start_num,
             feature_end_num,
@@ -171,7 +171,11 @@ __global__ void spmm_forward_cuda_kernel_mp(
     //int block_warpId = threadIdx.x / WARP_SIZE;               // block warp-id
     int laneid = threadIdx.x % WARP_SIZE;                     // warp thread-id -- laneid
 
-
+    // if (warpId == 0 && laneid == 0) {
+    //     for (int i = 0; i < 100; i++)
+    //     printf("%f\n", input[i * dim + laneid]);
+    // } 
+           
     if (warpId < num_warps) {
        
         int start = start_row[warpId];
@@ -191,21 +195,24 @@ __global__ void spmm_forward_cuda_kernel_mp(
         int features_start = 0;
 
         if (fstart != 0) {
-            src_norm = degrees[start];  
+            src_norm = 1;  
             
             for (int j = 0; j < fstart_num; j++) {
                 index = column_index[fstart++];
-                degree_norm_inv = __fmaf_rn(1, 1, 0);
-                partial_results_start += __fmaf_rn(1, 1, 0); 
+                degree_norm_inv = __fmaf_rn(src_norm, 1, 0);
+                partial_results_start += __fmaf_rn(degree_norm_inv, input[index * dim + laneid], 0); 
                             
             }
-
+            if (warpId == 1 && laneid == 0) {
+                
+                printf("%d %d %d %d\n", fstart, fstart_num, fend, fend_num);
+            }             
             atomicAdd_F((float*) &output[start * dim + laneid], partial_results_start);
             start = start + 1;
         }
 
         for (int i = start; i < end; i++) {
-            src_norm = degrees[i]; 
+            src_norm = 1;
             output_temp = 0.0f;
 
             num_features = row_pointers[i + 1] - row_pointers[i];
@@ -214,8 +221,8 @@ __global__ void spmm_forward_cuda_kernel_mp(
             #pragma unroll
             for (int j = 0; j < num_features; j++) {
                 index = column_index[features_start];
-                degree_norm_inv = __fmaf_rn(1, 1, 0);
-                output_temp += __fmaf_rn(1, 1, 0);
+                degree_norm_inv = __fmaf_rn(src_norm, 1, 0);
+                output_temp += __fmaf_rn(degree_norm_inv, input[index * dim + laneid], 0);
 
                 features_start++;
             }
@@ -230,7 +237,7 @@ __global__ void spmm_forward_cuda_kernel_mp(
             for (int j = 0; j < fend_num; j++) {
                 index = column_index[fend++];
                 degree_norm_inv = __fmaf_rn(src_norm, 1, 0);
-                partial_results_end += __fmaf_rn(1, 1, 0); 
+                partial_results_end += __fmaf_rn(degree_norm_inv, input[index * dim + laneid], 0); 
             } 
      
             atomicAdd_F((float*) &output[end * dim + laneid], partial_results_end);
@@ -253,14 +260,18 @@ int main(int argc, char *argv[]) {
     int num_nodes = NODE_NUM;
 
     /* Weight Matrix */
-    float *h_input  = (float *) calloc(NODE_ACT_NUM * DIM, sizeof(float));
-    float *h_output = (float *) calloc(NODE_ACT_NUM * DIM, sizeof(float)); 
-    for (int i = 0; i < NODE_ACT_NUM; i++) {
-        for (int j = 0; j < DIM; j++)
-            h_input[(i * DIM) + j] = 1;
+    float *h_input  = (float *) malloc(NODE_ACT_NUM * DIM * sizeof(float));
+    float *h_output = (float *) malloc(NODE_ACT_NUM * DIM * sizeof(float)); 
+    int *h_degrees = (int *) malloc(NODE_ACT_NUM * sizeof(int));
+
+    for (int i = 0; i < NODE_ACT_NUM * DIM; i++) {
+            h_input[i] = 1.0f;
     }
-
-
+    for (int i = 0; i < NODE_ACT_NUM; i++) {
+        h_degrees[i] = 2;
+    }
+    
+   
     /* Device allocation */
     float *d_input, *d_output;
     int *d_row_pointer, *d_col_index, *d_degrees;
@@ -270,7 +281,7 @@ int main(int argc, char *argv[]) {
 
     cudaMalloc((void**) &d_input, NODE_ACT_NUM * DIM * sizeof(float));
     cudaMemcpy(d_input, h_input, NODE_ACT_NUM * DIM * sizeof(float), cudaMemcpyHostToDevice);
-
+   
     cudaMalloc((void**) &d_row_pointer, (NODE_ACT_NUM) * sizeof(int));
     cudaMemcpy(d_row_pointer, feature_indices, (NODE_ACT_NUM) * sizeof(int), cudaMemcpyHostToDevice);
 
@@ -280,15 +291,15 @@ int main(int argc, char *argv[]) {
     cudaMalloc((void**) &d_output, NODE_ACT_NUM * DIM * sizeof(float));
     cudaMemset(&d_output, 0, NODE_ACT_NUM * DIM * sizeof(float)); 
 
-    cudaMalloc((void**) &d_degrees, (num_nodes) * sizeof(int));
-    cudaMemset(d_degrees, 0, (num_nodes) * sizeof(int)); 
+    cudaMalloc((void**) &d_degrees, (NODE_ACT_NUM) * sizeof(int));
+    cudaMemcpy(d_degrees, h_degrees, NODE_ACT_NUM * sizeof(int), cudaMemcpyHostToDevice);
 
     cudaMalloc((void**) &d_feature_start, NODE_ACT_NUM * DIM * sizeof(float));
     cudaMemcpy(d_feature_start, mp_sched[0], num_threads * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMalloc((void**) &d_feature_start_num, NODE_ACT_NUM * DIM * sizeof(float));
-    cudaMemcpy(d_feature_start_num, mp_sched[1], num_threads * sizeof(int), cudaMemcpyHostToDevice);
     cudaMalloc((void**) &d_feature_end, NODE_ACT_NUM * DIM * sizeof(float));
-    cudaMemcpy(d_feature_end, mp_sched[2], num_threads * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_feature_end, mp_sched[1], num_threads * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMalloc((void**) &d_feature_start_num, NODE_ACT_NUM * DIM * sizeof(float));
+    cudaMemcpy(d_feature_start_num, mp_sched[2], num_threads * sizeof(int), cudaMemcpyHostToDevice);
     cudaMalloc((void**) &d_feature_end_num, NODE_ACT_NUM * DIM * sizeof(float));
     cudaMemcpy(d_feature_end_num, mp_sched[3], num_threads * sizeof(int), cudaMemcpyHostToDevice);
     cudaMalloc((void**) &d_row_start, NODE_ACT_NUM * DIM * sizeof(float));
@@ -303,9 +314,9 @@ int main(int argc, char *argv[]) {
 
 
     int repeats = 1;
-    for (int i = 0; i < num_threads; i++){
-        cout << mp_sched[1][i] << endl;
-    }
+    // for (int i = 0; i < num_threads; i++){
+    //     cout << mp_sched[1][i] << endl;
+    // }
     for (int i = 0; i < repeats; i++) {
         spmm_forward_cuda_kernel_mp<<<grid, block>>>(
             (float *) d_output, (float *) d_input, 
