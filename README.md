@@ -12,7 +12,7 @@ CuSPARSE 10 or higer.
 # Compilation
 ```
 cd src
-nvcc MergePathSpmm.cu -o merge-path
+nvcc MergePathSpmm.cu -O3 -o merge-path 
 ```
 
 # Datasets
