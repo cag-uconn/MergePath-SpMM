@@ -25,7 +25,7 @@ using namespace std;
 #define COL_IDX 1
 #define WARP_SIZE 32
 
-int dim = 16;
+int dim = 4;
 int NODE_NUM = 0;
 int NODE_ACT_NUM = 0;
 int FEATURE_TOTAL = 0;
@@ -180,8 +180,8 @@ __global__ void spmm_forward_cuda_kernel_mp(
     int dim,
     int dimWorker,
     int warpPerBlock,
-    int num_warps
-
+    int num_warps,
+    int sched_to_process
 ) {
 
     int tid =  blockIdx.x * blockDim.x + threadIdx.x;  // global thread-id
@@ -189,9 +189,11 @@ __global__ void spmm_forward_cuda_kernel_mp(
     int laneid = threadIdx.x % WARP_SIZE;                     // warp thread-id -- laneid
 
     if (warpId < num_warps) {
-        int sched_to_process = 32 / dim;
         int sched_id = laneid / dim;
         int lane_id_8 = laneid % dim;
+        if (sched_id >= sched_to_process) { 
+            return;
+        }
         
         int start = start_row[sched_to_process * warpId + sched_id];
         int end = end_row[sched_to_process * warpId + sched_id];
@@ -218,7 +220,7 @@ __global__ void spmm_forward_cuda_kernel_mp(
                 partial_results_start += __fmaf_rn(degree_norm_inv, input[index * dim + lane_id_8], 0); 
                             
             }
-                      
+                       
             atomicAdd_F((float*) &output[start * dim + lane_id_8], partial_results_start);
             start = start + 1;
 
@@ -285,6 +287,7 @@ __global__ void spmm_forward_cuda_kernel_mp_64(
 
     if (warpId < num_warps_2) {
         if (warpId % 2 == 1) laneid +=  32;
+        if (laneid > dim)  return;
         warpId = warpId / 2;
        
         int start = start_row[warpId];
@@ -387,7 +390,7 @@ int main(int argc, char *argv[]) {
         while(std::getline(lineStream,cell, ','))
         {
             feature_indices[i] = stoi(cell);
-            cout << cell << endl;
+            //cout << cell << endl;
             i++;
         }
         i = 0;
@@ -401,7 +404,7 @@ int main(int argc, char *argv[]) {
         while(std::getline(lineStream,cell, ','))
         {
             feature_indices_2[i] = stoi(cell);
-            cout << cell << endl;
+            //cout << cell << endl;
             i++;
         }
         i = 0;
@@ -409,6 +412,10 @@ int main(int argc, char *argv[]) {
 
 
     int cost = (atoi(argv[2]));
+    dim = (atoi(argv[3]));
+    int threads_per_warp = (atoi(argv[4]));
+
+
     int num_threads = (NODE_ACT_NUM + FEATURE_TOTAL - 1) / cost;
     if (num_threads < 1024) num_threads = 1024;
     int num_nodes = NODE_NUM;
@@ -466,7 +473,12 @@ int main(int argc, char *argv[]) {
 
     int repeats = 200;
     if (dim <= 32) {
-        int sched_to_process = 32 / dim;
+        int sched_to_process = threads_per_warp;
+        if (threads_per_warp > 32 / dim) {
+            cout << "Cannot process the given number of threads withing a warp." << endl;
+            cout << "Max threads per warp can be " << 32 / dim << endl;
+            exit(-1);
+        }
         const int grid = num_threads / sched_to_process; 
         for (int i = 0; i < repeats; i++) {
             spmm_forward_cuda_kernel_mp<<<grid, block>>>(
@@ -478,7 +490,7 @@ int main(int argc, char *argv[]) {
                 (int *) d_feature_end_num,
                 (int *) d_row_start,
                 (int *) d_row_end,
-                num_nodes, dim, 32, 8, grid);
+                num_nodes, dim, 32, 8, grid, sched_to_process);
             cudaDeviceSynchronize();
         }
     }
@@ -518,3 +530,4 @@ int main(int argc, char *argv[]) {
     return 0;
    
 }
+
