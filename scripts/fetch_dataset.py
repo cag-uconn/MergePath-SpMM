@@ -1,3 +1,4 @@
+# Check this website to get list of available datasets
 # https://pytorch-geometric.readthedocs.io/en/latest/get_started/introduction.html
 
 from torch_geometric.datasets import *
