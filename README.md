@@ -10,25 +10,23 @@ Mohsin Shan, Deniz Gurevin, Jared Nye, Caiwen Ding, Omer Khan, "MergePath-SpMM: 
 CuSPARSE 10 or higer.
 
 # Compilation
-```
 Use the following command to build all the kernels.
+```
 make all
+```
+To build a specific kernel (row_wise, nz_splitting, mergepath) use following command.
+```
+make <kernel_name>
 ```
 
 # Datasets
-The datasets are present in the input folder.
-To run a sepecific dataset update MergePathSpmm.cu:22
-```
-#include "input/<dataset_name>.h"
-```
+The script scripts/fetch_dataset.py can be used to download any dataset from the pytorch geometric datasets. It will also convert the data into appropriate format used by the kernels.
 
 # Execution
-Use the following command to execute MergePath-SpMM.
+Use the following command to execute the kernels.
 ```
-nvprof ./merge-path <COST>
+nvprof ./<kernel_nam> <params>
 ```
 
-# Measurements
-The kernel time will be is given by 'spmm_forward_cuda_kernel_mp' entry.
 
 
