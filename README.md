@@ -11,8 +11,8 @@ CuSPARSE 10 or higer.
 
 # Compilation
 ```
-cd src
-nvcc MergePathSpmm.cu -O3 -o merge-path 
+Use the following command to build all the kernels.
+make all
 ```
 
 # Datasets
