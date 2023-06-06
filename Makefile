@@ -3,12 +3,16 @@ CC = nvcc
 CFLAGS  = -O3 
 
 # The build target 
-TARGET = row_wise
+ROW_WISE = row_wise
+NZ_SPLITTING = nz_splitting
 
-all: $(TARGET)
+all: $(ROW_WISE) $(NZ_SPLITTING)
 
-$(TARGET): src/$(TARGET).cu src/main.cpp
-	$(CC) $(CFLAGS) -o $(TARGET) src/$(TARGET).cu src/main.cpp
+$(ROW_WISE): src/$(ROW_WISE).cu 
+	$(CC) $(CFLAGS) -o $(ROW_WISE) src/$(ROW_WISE).cu
+
+$(NZ_SPLITTING): src/$(NZ_SPLITTING).cu 
+	$(CC) $(CFLAGS) -o $(NZ_SPLITTING) src/$(NZ_SPLITTING).cu
 
 clean:
-	$(RM) $(TARGET)
+	$(RM) $(ROW_WISE) $(NZ_SPLITTING)
