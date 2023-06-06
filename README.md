@@ -25,7 +25,7 @@ The script scripts/fetch_dataset.py can be used to download any dataset from the
 # Execution
 Use the following command to execute the kernels.
 ```
-nvprof ./<kernel_nam> <params>
+nvprof ./<kernel_name> <params>
 ```
 
 
