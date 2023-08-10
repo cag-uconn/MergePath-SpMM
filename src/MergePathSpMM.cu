@@ -1,10 +1,13 @@
+#include <cuda.h>
+#include <cuda_fp16.h>
+#include <cuda_runtime.h>
+#include <stdio.h>
+#include <vector>
 
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <vector>
-
-
 #include <algorithm>
 #include <cassert>
 #include <chrono>
@@ -18,19 +21,22 @@
 #include <string>
 #include <vector>
 
-
 using namespace std;
 
-#define ROW_PTR 0
-#define COL_IDX 1
-#define WARP_SIZE 32
-
-int dim = 4;
+/* Total number of nodes */
 int NODE_NUM = 0;
+/* Total number of nodes in CSR */
 int NODE_ACT_NUM = 0;
+/* Total number of non-zeros */
 int FEATURE_TOTAL = 0;
-int *feature_indices;
-int *feature_indices_2;
+
+/* Row and column ptr */
+int *row_ptr;
+int *col_ptr;
+
+const int WARP_SIZE = 32;
+const int WARPS_PER_BLOCK = 8;
+const int BLOCK = WARPS_PER_BLOCK * WARP_SIZE; 
 
 #define CHECK_CUDA_ERROR(val) check((val), #val, __FILE__, __LINE__)
 template <typename T>
@@ -42,8 +48,6 @@ void check(T err, const char* const func, const char* const file,
         std::cerr << "CUDA Runtime Error at: " << file << ":" << line
                   << std::endl;
         std::cerr << cudaGetErrorString(err) << " " << func << std::endl;
-        // We don't exit when we encounter CUDA errors in this example.
-        // std::exit(EXIT_FAILURE);
     }
 }
 
@@ -53,10 +57,224 @@ void atomicAdd_F(float* address, float value)
   float old = value;  
   while ((old = atomicExch(address, atomicExch(address, 0.0f)+old))!=0.0f);
 }
+
+
 struct CoordinateT {
     int x;
     int y;
 };
+CoordinateT MergePathSearch( int diagonal, volatile int* RP, int* NZ_INDICES, int num_rows, int nnz);
+std::vector<int *> generate_mp_sched(int num_threads);
+
+__global__ void spmm_merge_path(
+    float *output,
+    float *input, 
+    int *row_pointers, 
+    int *column_index, 
+    int *degrees, 
+    int *feature_start,
+    int *feature_end,
+    int *feature_start_num,
+    int *feature_end_num,    
+    int *start_row,
+    int *end_row,
+    int num_nodes, 
+    int dim,
+    int dimWorker,
+    int warpPerBlock,
+    int num_warps,
+    int sched_to_process
+);
+
+__global__ void spmm_merge_path_64(
+    float *output,
+    float *input, 
+    int *row_pointers, 
+    int *column_index, 
+    int *degrees, 
+    int *feature_start,
+    int *feature_end,
+    int *feature_start_num,
+    int *feature_end_num,    
+    int *start_row,
+    int *end_row,
+    int num_nodes, 
+    int dim,
+    int dimWorker,
+    int warpPerBlock,
+    int num_warps,
+    int factor
+);
+
+    
+int main(int argc, char *argv[]) {
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, 0); 
+
+    if (argc < 6) {
+        cout << "Usage: ./application <input_file> <dimension> <cost> <threads_per_warp> <repeat>" << endl;
+        exit(-1);
+    }
+
+    ifstream matrix_file(argv[1]);
+    int dimension = atoi(argv[2]);
+    int cost = atoi(argv[3]);
+    int threads_per_warp = (atoi(argv[4]));
+    int repeats = atoi(argv[5]);
+    int num_threads = 0; 
+
+    /* Read the input file */
+    string line;
+    string cell;
+
+    /* Count the toal number of nodes and non-zeros */
+    getline(matrix_file, line); 
+    stringstream lineStream(line);
+    while(std::getline(lineStream,cell, ',')) {
+        NODE_ACT_NUM++;
+        FEATURE_TOTAL = stoi(cell);
+    }
+    NODE_NUM = NODE_ACT_NUM - 1;
+    num_threads = (NODE_ACT_NUM + FEATURE_TOTAL - 1) / cost;
+    if (num_threads < 1024) num_threads = 1024;
+
+    cout << "Total number of rows: " << NODE_NUM << " and non-zeros: " << FEATURE_TOTAL << endl;
+    
+    row_ptr = (int *) malloc(NODE_ACT_NUM * sizeof(int));
+    col_ptr = (int *) malloc(FEATURE_TOTAL * sizeof(int));
+    
+    /* Populate row and col ptrs*/
+    matrix_file.seekg(ios_base::beg);
+    {
+        getline(matrix_file, line);
+        int i = 0;
+        stringstream lineStream(line);
+        string cell;
+    
+        while(std::getline(lineStream,cell, ',')) {
+            row_ptr[i] = stoi(cell);
+            //cout << cell << endl;
+            i++;
+        }
+        i = 0;
+    }
+    {
+        getline(matrix_file, line);
+        int i = 0;
+        stringstream lineStream(line);
+        string cell;
+    
+        while(std::getline(lineStream,cell, ',')) {
+            col_ptr[i] = stoi(cell);
+            //cout << cell << endl;
+            i++;
+        }
+        i = 0;
+    }
+
+    /* Weight Matrix */
+    float *h_input  = (float *) malloc(NODE_ACT_NUM * dimension * sizeof(float));
+    float *h_output = (float *) malloc(NODE_ACT_NUM * dimension * sizeof(float)); 
+    int *h_degrees  = (int *) malloc(NODE_ACT_NUM * sizeof(int));
+   
+    for (int i = 0; i < NODE_ACT_NUM * dimension; i++) {
+        h_input[i] = 1.0f;
+    }
+    for (int i = 0; i < NODE_NUM; i++) {
+        h_degrees[i] = row_ptr[i + 1] - row_ptr[i];
+    }
+   
+    /* Device allocation */
+    float *d_input, *d_output;
+    int *d_row_pointer, *d_col_index, *d_degrees;
+    int *d_feature_start, *d_feature_start_num, *d_feature_end, *d_feature_end_num;
+    int *d_row_start, *d_row_end;
+    auto mp_sched = generate_mp_sched(num_threads);
+
+    cudaMalloc((void**) &d_input, NODE_ACT_NUM * dimension * sizeof(float));
+    cudaMemcpy(d_input, h_input, NODE_ACT_NUM * dimension * sizeof(float), cudaMemcpyHostToDevice);
+    
+    cudaMalloc((void**) &d_row_pointer, (NODE_ACT_NUM) * sizeof(int));
+    cudaMemcpy(d_row_pointer, row_ptr, (NODE_ACT_NUM) * sizeof(int), cudaMemcpyHostToDevice);
+   
+    cudaMalloc((void**) &d_col_index, (FEATURE_TOTAL) * sizeof(int));
+    cudaMemcpy(d_col_index, col_ptr, FEATURE_TOTAL * sizeof(int), cudaMemcpyHostToDevice);
+
+    cudaMalloc((void**) &d_output, NODE_ACT_NUM * dimension * sizeof(float));
+    cudaMemset(&d_output, 0, NODE_ACT_NUM * dimension* sizeof(float)); 
+    
+    cudaMalloc((void**) &d_degrees, (NODE_ACT_NUM) * sizeof(int));
+    cudaMemcpy(d_degrees, h_degrees, NODE_ACT_NUM * sizeof(int), cudaMemcpyHostToDevice);
+
+    cudaMalloc((void**) &d_feature_start, num_threads * sizeof(int));
+    cudaMemcpy(d_feature_start, mp_sched[0], num_threads * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMalloc((void**) &d_feature_start_num, num_threads * sizeof(int));
+    cudaMemcpy(d_feature_start_num, mp_sched[1], num_threads * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMalloc((void**) &d_feature_end, num_threads * sizeof(int));
+    cudaMemcpy(d_feature_end, mp_sched[2], num_threads * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMalloc((void**) &d_feature_end_num, num_threads * sizeof(int));
+    cudaMemcpy(d_feature_end_num, mp_sched[3], num_threads * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMalloc((void**) &d_row_start, num_threads * sizeof(int));
+    cudaMemcpy(d_row_start, mp_sched[4], num_threads * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMalloc((void**) &d_row_end, num_threads * sizeof(int));
+    cudaMemcpy(d_row_end, mp_sched[5], num_threads * sizeof(int), cudaMemcpyHostToDevice);
+
+
+    if (dimension <= WARP_SIZE) {
+        if (threads_per_warp > WARP_SIZE / dimension) {
+            cout << "Cannot process the given number of threads withing a warp." << endl;
+            cout << "Max threads per warp can be " << WARP_SIZE / dimension << endl;
+            exit(-1);
+        }
+
+        const int grid = (num_threads * WARP_SIZE + BLOCK - 1) / (BLOCK * threads_per_warp); 
+        for (int i = 0; i < repeats; i++) {
+            spmm_merge_path<<<grid, BLOCK>>>(
+                (float *) d_output, (float *) d_input, 
+                (int *) d_row_pointer, (int *) d_col_index, (int *) d_degrees, 
+                (int *) d_feature_start,
+                (int *) d_feature_end,
+                (int *) d_feature_start_num,
+                (int *) d_feature_end_num,
+                (int *) d_row_start,
+                (int *) d_row_end,
+                NODE_NUM, dimension, WARP_SIZE, WARPS_PER_BLOCK, num_threads, threads_per_warp);
+            cudaDeviceSynchronize();
+        }
+    }
+    else {
+
+        int factor = ceil(dimension / WARP_SIZE);
+        int num_threads_gpu = num_threads * factor; 
+        int grid = (num_threads_gpu * WARP_SIZE + BLOCK  - 1) / (BLOCK);
+        
+        for (int i = 0; i < repeats; i++) {
+            spmm_merge_path_64<<<grid, BLOCK>>>(
+                (float *) d_output, (float *) d_input, 
+                (int *) d_row_pointer, (int *) d_col_index, (int *) d_degrees, 
+                (int *) d_feature_start,
+                (int *) d_feature_end,
+                (int *) d_feature_start_num,
+                (int *) d_feature_end_num,
+                (int *) d_row_start,
+                (int *) d_row_end,
+                NODE_NUM, dimension, WARP_SIZE, WARPS_PER_BLOCK, num_threads_gpu, factor);
+            cudaDeviceSynchronize();
+        }
+    }
+
+    
+    cudaMemcpy(h_output, d_output, NODE_ACT_NUM * dimension * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // for (int i = 0; i < NODE_NUM; i++) {
+    //     for (int j = 0; j < dimension; j++) {
+    //         cout <<  float2float(h_output[i * dimension + j]) << "-";
+    //     }
+    //     std::cout << endl;
+    // }
+
+    return 0;
+}
 
 
 CoordinateT MergePathSearch( int diagonal, volatile int* RP, int* NZ_INDICES, int num_rows, int nnz)
@@ -112,8 +330,8 @@ std::vector<int *> generate_mp_sched(int num_threads) {
         int diagonal = min(items_per_thread * core_id, num_merge_items);
         int diagonal_end = min(diagonal + items_per_thread, num_merge_items);
                                                                 
-        CoordinateT thread_coord = MergePathSearch(diagonal, feature_indices, NZ_INDICES, NODE_ACT_NUM, FEATURE_TOTAL);
-        CoordinateT thread_coord_end = MergePathSearch(diagonal_end, feature_indices, NZ_INDICES, NODE_ACT_NUM, FEATURE_TOTAL);
+        CoordinateT thread_coord = MergePathSearch(diagonal, row_ptr, NZ_INDICES, NODE_ACT_NUM, FEATURE_TOTAL);
+        CoordinateT thread_coord_end = MergePathSearch(diagonal_end, row_ptr, NZ_INDICES, NODE_ACT_NUM, FEATURE_TOTAL);
     
         int start = thread_coord.x - 1;
         int end = thread_coord_end.x - 1;
@@ -122,7 +340,7 @@ std::vector<int *> generate_mp_sched(int num_threads) {
         int num_features = 0;
 
         int feature_start = thread_coord.y;
-        if (feature_indices[start] == feature_start) {
+        if (row_ptr[start] == feature_start) {
             feature_start = 0;
         }
         if (core_id == 0) {
@@ -130,7 +348,7 @@ std::vector<int *> generate_mp_sched(int num_threads) {
         }
 
         int feature_end = thread_coord_end.y;
-        if (feature_indices[end] == feature_end) {
+        if (row_ptr[end] == feature_end) {
             feature_end = 0;
         }
 
@@ -140,12 +358,12 @@ std::vector<int *> generate_mp_sched(int num_threads) {
                 feature_end = 0;
             }
             else {
-                num_features = feature_indices[start + 1] - feature_start;
+                num_features = row_ptr[start + 1] - feature_start;
             }
             
         }
         int num_features_end = 0;
-        if (feature_end != 0) num_features_end = feature_end - feature_indices[end];
+        if (feature_end != 0) num_features_end = feature_end - row_ptr[end];
 
         feature_start_all[core_id] = feature_start;
         feature_end_all[core_id]   = feature_end; 
@@ -164,7 +382,7 @@ std::vector<int *> generate_mp_sched(int num_threads) {
 }
 
 
-__global__ void spmm_forward_cuda_kernel_mp(
+__global__ void spmm_merge_path(
     float *output,
     float *input, 
     int *row_pointers, 
@@ -187,10 +405,10 @@ __global__ void spmm_forward_cuda_kernel_mp(
     int tid =  blockIdx.x * blockDim.x + threadIdx.x;  // global thread-id
     int warpId = tid / WARP_SIZE;                             // global warp-id
     int laneid = threadIdx.x % WARP_SIZE;                     // warp thread-id -- laneid
-
+    
     if (warpId < num_warps) {
         int sched_id = laneid / dim;
-        int lane_id_8 = laneid % dim;
+        laneid =  laneid % dim;
         if (sched_id >= sched_to_process) { 
             return;
         }
@@ -216,12 +434,11 @@ __global__ void spmm_forward_cuda_kernel_mp(
             
             for (int j = 0; j < fstart_num; j++) {
                 index = column_index[fstart++];
-                degree_norm_inv = __fmaf_rn(src_norm, degrees[index], 0);
-                partial_results_start += __fmaf_rn(degree_norm_inv, input[index * dim + lane_id_8], 0); 
+                degree_norm_inv =  __fmaf_rn(src_norm, degrees[index], 0);
+                partial_results_start +=  __fmaf_rn(degree_norm_inv, input[index * dim + laneid], 0); 
                             
             }
-                       
-            atomicAdd_F((float*) &output[start * dim + lane_id_8], partial_results_start);
+            atomicAdd(&output[start * dim + laneid], partial_results_start);         
             start = start + 1;
 
         }
@@ -236,12 +453,12 @@ __global__ void spmm_forward_cuda_kernel_mp(
             #pragma unroll
             for (int j = 0; j < num_features; j++) {
                 index = column_index[features_start];
-                degree_norm_inv = __fmaf_rn(src_norm, degrees[index], 0);
-                output_temp += __fmaf_rn(degree_norm_inv, input[index * dim + lane_id_8], 0);
+                degree_norm_inv =  __fmaf_rn(src_norm, degrees[index], 0);
+                output_temp += __fmaf_rn(degree_norm_inv, input[index * dim + laneid], 0);
                 features_start++;
             }
 
-            output[i * dim + lane_id_8] = output_temp;
+            output[i * dim + laneid] = output_temp;
         }             
 
         if (fend != 0) {
@@ -250,18 +467,17 @@ __global__ void spmm_forward_cuda_kernel_mp(
             #pragma unroll
             for (int j = 0; j < fend_num; j++) {
                 index = column_index[fend++];
-                degree_norm_inv = __fmaf_rn(src_norm, degrees[index], 0);
-                partial_results_end += __fmaf_rn(degree_norm_inv, input[index * dim + lane_id_8], 0); 
+                degree_norm_inv =  __fmaf_rn(src_norm, degrees[index], 0);
+                partial_results_end += __fmaf_rn(degree_norm_inv, input[index * dim + laneid], 0); 
             } 
-        
-            atomicAdd_F((float*) &output[end * dim + lane_id_8], partial_results_end);
+            atomicAdd(&output[end * dim + laneid], partial_results_end);
         }
         return;
     }
 }
 
 
-__global__ void spmm_forward_cuda_kernel_mp_64(
+__global__ void spmm_merge_path_64(
     float *output,
     float *input, 
     int *row_pointers, 
@@ -278,17 +494,18 @@ __global__ void spmm_forward_cuda_kernel_mp_64(
     int dimWorker,
     int warpPerBlock,
     int num_warps,
-    int num_warps_2
+    int factor
 ) {
 
     int tid =  blockIdx.x * blockDim.x + threadIdx.x;  // global thread-id
     int warpId = tid / WARP_SIZE;                             // global warp-id
     int laneid = threadIdx.x % WARP_SIZE;                     // warp thread-id -- laneid
-
-    if (warpId < num_warps_2) {
-        if (warpId % 2 == 1) laneid +=  32;
+    
+    if (warpId < num_warps) {
+        
+        laneid += (warpId % factor) * 32;
         if (laneid > dim)  return;
-        warpId = warpId / 2;
+        warpId = warpId / factor;
        
         int start = start_row[warpId];
         int end = end_row[warpId];
@@ -311,12 +528,11 @@ __global__ void spmm_forward_cuda_kernel_mp_64(
             
             for (int j = 0; j < fstart_num; j++) {
                 index = column_index[fstart++];
-                degree_norm_inv = __fmaf_rn(src_norm, degrees[index], 0);
-                partial_results_start += __fmaf_rn(degree_norm_inv, input[index * dim + laneid], 0); 
+                degree_norm_inv =  __fmaf_rn(src_norm, degrees[index], 0);
+                partial_results_start +=  __fmaf_rn(degree_norm_inv, input[index * dim + laneid], 0); 
                             
             }
-                      
-            atomicAdd_F((float*) &output[start * dim + laneid], partial_results_start);
+            atomicAdd(&output[start * dim + laneid], partial_results_start);         
             start = start + 1;
 
         }
@@ -331,7 +547,7 @@ __global__ void spmm_forward_cuda_kernel_mp_64(
             #pragma unroll
             for (int j = 0; j < num_features; j++) {
                 index = column_index[features_start];
-                degree_norm_inv = __fmaf_rn(src_norm, degrees[index], 0);
+                degree_norm_inv =  __fmaf_rn(src_norm, degrees[index], 0);
                 output_temp += __fmaf_rn(degree_norm_inv, input[index * dim + laneid], 0);
                 features_start++;
             }
@@ -345,189 +561,11 @@ __global__ void spmm_forward_cuda_kernel_mp_64(
             #pragma unroll
             for (int j = 0; j < fend_num; j++) {
                 index = column_index[fend++];
-                degree_norm_inv = __fmaf_rn(src_norm, degrees[index], 0);
-                partial_results_end += __fmaf_rn(degree_norm_inv, input[index * dim + laneid], 0); 
+                degree_norm_inv =  __fmaf_rn(src_norm, degrees[index], 0);
+                partial_results_end +=  __fmaf_rn(degree_norm_inv, input[index * dim + laneid], 0); 
             } 
-        
-            atomicAdd_F((float*) &output[end * dim + laneid], partial_results_end);
+            atomicAdd(&output[end * dim + laneid], partial_results_end);
         }
         return;
     }
 }
-
-int main(int argc, char *argv[]) {
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, 0); 
-
-    if (argc < 2) {
-        cout << "Please enter cost as well" << endl;
-        exit(-1);
-    }
-    ifstream feature_indices_file(argv[1]);
-
-    string line;
-    string cell;
-
-    getline(feature_indices_file, line); 
-    stringstream lineStream(line);
-    while(std::getline(lineStream,cell, ',')) {
-        NODE_ACT_NUM++;
-        FEATURE_TOTAL = stoi(cell);
-    }
-    NODE_NUM = NODE_ACT_NUM - 1;
-    cout << FEATURE_TOTAL << endl;
-
-    feature_indices   = (int *) malloc(NODE_ACT_NUM * sizeof(int));
-    feature_indices_2 = (int *) malloc(FEATURE_TOTAL * sizeof(int));
-    
-    feature_indices_file.seekg(ios_base::beg);
-    {
-        getline(feature_indices_file, line);
-        int i = 0;
-        stringstream lineStream(line);
-        string cell;
-    
-        while(std::getline(lineStream,cell, ','))
-        {
-            feature_indices[i] = stoi(cell);
-            //cout << cell << endl;
-            i++;
-        }
-        i = 0;
-    }
-    {
-        getline(feature_indices_file, line);
-        int i = 0;
-        stringstream lineStream(line);
-        string cell;
-    
-        while(std::getline(lineStream,cell, ','))
-        {
-            feature_indices_2[i] = stoi(cell);
-            //cout << cell << endl;
-            i++;
-        }
-        i = 0;
-    }
-
-
-    int cost = (atoi(argv[2]));
-    dim = (atoi(argv[3]));
-    int threads_per_warp = (atoi(argv[4]));
-
-
-    int num_threads = (NODE_ACT_NUM + FEATURE_TOTAL - 1) / cost;
-    if (num_threads < 1024) num_threads = 1024;
-    int num_nodes = NODE_NUM;
-
-    /* Weight Matrix */
-    float *h_input  = (float *) malloc(NODE_ACT_NUM * dim * sizeof(float));
-    float *h_output = (float *) malloc(NODE_ACT_NUM * dim * sizeof(float)); 
-    int *h_degrees  = (int *) malloc(NODE_ACT_NUM * sizeof(int));
-   
-    for (int i = 0; i < NODE_ACT_NUM * dim; i++) {
-        h_input[i] = 1.0f;
-    }
-    for (int i = 0; i < NODE_NUM; i++) {
-        h_degrees[i] = feature_indices[i + 1] - feature_indices[i];
-    }
-   
-    /* Device allocation */
-    float *d_input, *d_output;
-    int *d_row_pointer, *d_col_index, *d_degrees;
-    int *d_feature_start, *d_feature_start_num, *d_feature_end, *d_feature_end_num;
-    int *d_row_start, *d_row_end;
-    auto mp_sched = generate_mp_sched(num_threads);
-
-    cudaMalloc((void**) &d_input, NODE_ACT_NUM * dim * sizeof(float));
-    cudaMemcpy(d_input, h_input, NODE_ACT_NUM * dim * sizeof(float), cudaMemcpyHostToDevice);
-    
-    cudaMalloc((void**) &d_row_pointer, (NODE_ACT_NUM) * sizeof(int));
-    cudaMemcpy(d_row_pointer, feature_indices, (NODE_ACT_NUM) * sizeof(int), cudaMemcpyHostToDevice);
-   
-    cudaMalloc((void**) &d_col_index, (FEATURE_TOTAL) * sizeof(int));
-    cudaMemcpy(d_col_index, feature_indices_2, FEATURE_TOTAL * sizeof(int), cudaMemcpyHostToDevice);
-
-    cudaMalloc((void**) &d_output, NODE_ACT_NUM * dim * sizeof(float));
-    cudaMemset(&d_output, 0, NODE_ACT_NUM * dim * sizeof(float)); 
-    
-    cudaMalloc((void**) &d_degrees, (NODE_ACT_NUM) * sizeof(int));
-    cudaMemcpy(d_degrees, h_degrees, NODE_ACT_NUM * sizeof(int), cudaMemcpyHostToDevice);
-
-    cudaMalloc((void**) &d_feature_start, num_threads * sizeof(int));
-    cudaMemcpy(d_feature_start, mp_sched[0], num_threads * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMalloc((void**) &d_feature_start_num, num_threads * sizeof(int));
-    cudaMemcpy(d_feature_start_num, mp_sched[1], num_threads * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMalloc((void**) &d_feature_end, num_threads * sizeof(int));
-    cudaMemcpy(d_feature_end, mp_sched[2], num_threads * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMalloc((void**) &d_feature_end_num, num_threads * sizeof(int));
-    cudaMemcpy(d_feature_end_num, mp_sched[3], num_threads * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMalloc((void**) &d_row_start, num_threads * sizeof(int));
-    cudaMemcpy(d_row_start, mp_sched[4], num_threads * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMalloc((void**) &d_row_end, num_threads * sizeof(int));
-    cudaMemcpy(d_row_end, mp_sched[5], num_threads * sizeof(int), cudaMemcpyHostToDevice);
-
-    /* Kernel Params */
-    const int warpPerBlock = 8;
-    const int block = warpPerBlock * WARP_SIZE; 
-
-    int repeats = 200;
-    if (dim <= 32) {
-        int sched_to_process = threads_per_warp;
-        if (threads_per_warp > 32 / dim) {
-            cout << "Cannot process the given number of threads withing a warp." << endl;
-            cout << "Max threads per warp can be " << 32 / dim << endl;
-            exit(-1);
-        }
-        const int grid = num_threads / sched_to_process; 
-        for (int i = 0; i < repeats; i++) {
-            spmm_forward_cuda_kernel_mp<<<grid, block>>>(
-                (float *) d_output, (float *) d_input, 
-                (int *) d_row_pointer, (int *) d_col_index, (int *) d_degrees, 
-                (int *) d_feature_start,
-                (int *) d_feature_end,
-                (int *) d_feature_start_num,
-                (int *) d_feature_end_num,
-                (int *) d_row_start,
-                (int *) d_row_end,
-                num_nodes, dim, 32, 8, grid, sched_to_process);
-            cudaDeviceSynchronize();
-        }
-    }
-    else {
-        
-        const int grid = num_threads; 
-        
-        for (int i = 0; i < repeats; i++) {
-            spmm_forward_cuda_kernel_mp_64<<<grid * 2, block>>>(
-                (float *) d_output, (float *) d_input, 
-                (int *) d_row_pointer, (int *) d_col_index, (int *) d_degrees, 
-                (int *) d_feature_start,
-                (int *) d_feature_end,
-                (int *) d_feature_start_num,
-                (int *) d_feature_end_num,
-                (int *) d_row_start,
-                (int *) d_row_end,
-                num_nodes, dim, 32, 8, grid, grid * 2);
-        cudaDeviceSynchronize();
-    }
-    }
-
-    
-    cudaMemcpy(h_output, d_output, NODE_ACT_NUM * dim * sizeof(float), cudaMemcpyDeviceToHost);
-
-    for (int i = 0; i < NODE_NUM; i++) {
-        for (int j = 0; j < dim; j++) {
-        //     // if (feature_indices[i+1] - feature_indices[i] != (int)h_output[i * dim]) {
-        //     //     cout << feature_indices[i+1] - feature_indices[i] <<"," << (int)h_output[i * dim]  << endl;
-        //     // }
-        //     printf("%d, %d",, (int)h_output[i * dim]);
-            //cout <<  feature_indices[i+1] - feature_indices[i] << "," << (int)h_output[i * dim + j] << "-";
-        }
-        
-        //std::cout << endl;
-    }
-    return 0;
-   
-}
-
