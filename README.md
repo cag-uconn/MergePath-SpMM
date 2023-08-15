@@ -9,6 +9,13 @@ Mohsin Shan, Deniz Gurevin, Jared Nye, Caiwen Ding, Omer Khan, "MergePath-SpMM: 
 # Requirements
 CuSPARSE 10 or higer.
 
+# Datasets
+Use the following commands to download and extract datasets
+```
+wget --no-check-certificate 'https://drive.google.com/uc?export=download&id=1SF8rfz66qJ-b0MT5v5qWuxNJpydb3_hj' -O datasets.tar
+tar -xvf datasets.tar
+```
+
 # Compilation
 Use the following command to build all the kernels.
 ```
