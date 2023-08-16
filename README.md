@@ -2,6 +2,8 @@
 
 Parallel Sparse Matrix-Matrix Algorithm for Graph Neural Network Acceleration
 
+[Paper at ISPASS 2023](https://ieeexplore.ieee.org/abstract/document/10158225)
+
 # Citation
 @inproceedings{MergePath-SpMM,
   title={MergePath-SpMM: Parallel Sparse Matrix-Matrix Algorithm for Graph Neural Network Acceleration}, 
