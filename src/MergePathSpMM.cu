@@ -438,7 +438,7 @@ __global__ void spmm_merge_path(
                 partial_results_start +=  __fmaf_rn(degree_norm_inv, input[index * dim + laneid], 0); 
                             
             }
-            atomicAdd(&output[start * dim + laneid], partial_results_start);         
+            atomicAdd_F(&output[start * dim + laneid], partial_results_start);         
             start = start + 1;
 
         }
@@ -470,7 +470,7 @@ __global__ void spmm_merge_path(
                 degree_norm_inv =  __fmaf_rn(src_norm, degrees[index], 0);
                 partial_results_end += __fmaf_rn(degree_norm_inv, input[index * dim + laneid], 0); 
             } 
-            atomicAdd(&output[end * dim + laneid], partial_results_end);
+            atomicAdd_F(&output[end * dim + laneid], partial_results_end);
         }
         return;
     }
@@ -532,7 +532,7 @@ __global__ void spmm_merge_path_64(
                 partial_results_start +=  __fmaf_rn(degree_norm_inv, input[index * dim + laneid], 0); 
                             
             }
-            atomicAdd(&output[start * dim + laneid], partial_results_start);         
+            atomicAdd_F(&output[start * dim + laneid], partial_results_start);         
             start = start + 1;
 
         }
@@ -564,7 +564,7 @@ __global__ void spmm_merge_path_64(
                 degree_norm_inv =  __fmaf_rn(src_norm, degrees[index], 0);
                 partial_results_end +=  __fmaf_rn(degree_norm_inv, input[index * dim + laneid], 0); 
             } 
-            atomicAdd(&output[end * dim + laneid], partial_results_end);
+            atomicAdd_F(&output[end * dim + laneid], partial_results_end);
         }
         return;
     }
