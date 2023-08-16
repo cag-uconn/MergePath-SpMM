@@ -40,6 +40,12 @@ Use the following command to execute the kernels.
 ```
 nvprof ./<kernel_name> <params>
 ```
+
+For example, to execute MergePath kernel, use the folloing commnd.
+```
+nvprof src/MergePathSpMM <dataset>.csr <dimension> <cost> <threads_per_warp> <repeat>
+``` 
+
 # Additional Results
 ![Additional Results](ar.png)
 The figure expands on the experimental data presented in the Figure 4 of the [ISPASS 2023 paper](https://ieeexplore.ieee.org/abstract/document/10158225). All measurements use the standalone kernels in this open-source repository, except the baseline GNNAdvisor uses the version presented in the [OSDI 2021 paper](https://github.com/YukeWang96/GNNAdvisor_OSDI21). All measurements use Cuda compilation tools, release 11.4, V11.4.152. The measurements are reported on an Quadro RTX 6000 NVidia GPU using nvprof tool. 
