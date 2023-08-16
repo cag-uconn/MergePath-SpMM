@@ -3,8 +3,15 @@
 Parallel Sparse Matrix-Matrix Algorithm for Graph Neural Network Acceleration
 
 # Citation
-
-Mohsin Shan, Deniz Gurevin, Jared Nye, Caiwen Ding, Omer Khan, "MergePath-SpMM: Parallel Sparse Matrix-Matrix Algorithm for Graph Neural Network Acceleration", IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS 2023), Raleigh, NC, April 23-25, 2023.
+@INPROCEEDINGS{10158225,
+  author={Shan, Mohsin and Gurevin, Deniz and Nye, Jared and Ding, Caiwen and Khan, Omer},
+  booktitle={2023 IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS)}, 
+  title={MergePath-SpMM: Parallel Sparse Matrix-Matrix Algorithm for Graph Neural Network Acceleration}, 
+  year={2023},
+  volume={},
+  number={},
+  pages={145-156},
+  doi={10.1109/ISPASS57527.2023.00023}}
 
 # Requirements
 CuSPARSE 10 or higer.
