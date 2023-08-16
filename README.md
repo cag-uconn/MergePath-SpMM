@@ -3,12 +3,14 @@
 [Paper at ISPASS 2023](https://ieeexplore.ieee.org/abstract/document/10158225)
 
 # Citation
+```
 @inproceedings{MergePath-SpMM,
   title={MergePath-SpMM: Parallel Sparse Matrix-Matrix Algorithm for Graph Neural Network Acceleration}, 
   author={Shan, Mohsin and Gurevin, Deniz and Nye, Jared and Ding, Caiwen and Khan, Omer},
   booktitle={IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS'23)}, 
   year={2023}
 }
+```
 
 # Requirements
 CuSPARSE 10 or higer.
