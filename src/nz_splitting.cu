@@ -242,12 +242,12 @@ int main(int argc, char *argv[]) {
     
     cudaMemcpy(h_output, d_output, NODE_ACT_NUM * dimension * sizeof(float), cudaMemcpyDeviceToHost);
 
-    for (int i = 0; i < NODE_NUM; i++) {
-        for (int j = 0; j < dimension; j++) {
-            cout <<  h_output[i * dimension + j] << "-";
-        }
-        std::cout << endl;
-    }
+    //for (int i = 0; i < NODE_NUM; i++) {
+    //    for (int j = 0; j < dimension; j++) {
+    //        cout <<  h_output[i * dimension + j] << "-";
+    //    }
+    //    std::cout << endl;
+    //}
 
     return 0;
 }
