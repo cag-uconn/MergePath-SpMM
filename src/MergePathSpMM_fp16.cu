@@ -364,7 +364,10 @@ std::vector<int *> generate_mp_sched(int num_threads) {
             
         }
         int num_features_end = 0;
-        if (feature_end != 0) num_features_end = feature_end - row_ptr[end];
+        if (feature_end != 0) {
+            num_features_end = feature_end - row_ptr[end];
+            feature_end = row_ptr[end];
+        }
 
         feature_start_all[core_id] = feature_start;
         feature_end_all[core_id]   = feature_end; 
