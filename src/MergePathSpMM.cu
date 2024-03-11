@@ -201,7 +201,7 @@ int main(int argc, char *argv[]) {
     cudaMemcpy(d_col_index, col_ptr, FEATURE_TOTAL * sizeof(int), cudaMemcpyHostToDevice);
 
     cudaMalloc((void**) &d_output, NODE_ACT_NUM * dimension * sizeof(float));
-    cudaMemset(&d_output, 0, NODE_ACT_NUM * dimension* sizeof(float)); 
+    cudaMemset(d_output, 0, NODE_ACT_NUM * dimension* sizeof(float)); 
     
     cudaMalloc((void**) &d_degrees, (NODE_ACT_NUM) * sizeof(int));
     cudaMemcpy(d_degrees, h_degrees, NODE_ACT_NUM * sizeof(int), cudaMemcpyHostToDevice);
